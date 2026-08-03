@@ -43,18 +43,18 @@ humble
 sudo apt update
 
 sudo apt install -y \
-  ros-humble-gazebo-ros-pkgs \
-  ros-humble-gazebo-ros2-control \
-  ros-humble-xacro \
-  ros-humble-robot-localization \
-  ros-humble-ros2-controllers \
-  ros-humble-ros2-control \
-  ros-humble-velodyne \
-  ros-humble-velodyne-gazebo-plugins \
-  ros-humble-velodyne-description \
-  python3-rosdep \
-  python3-colcon-common-extensions \
-  git
+ros-humble-gazebo-ros-pkgs \
+ros-humble-gazebo-ros2-control \
+ros-humble-xacro \
+ros-humble-robot-localization \
+ros-humble-ros2-controllers \
+ros-humble-ros2-control \
+ros-humble-velodyne \
+ros-humble-velodyne-gazebo-plugins \
+ros-humble-velodyne-description \
+python3-rosdep \
+python3-colcon-common-extensions \
+git
 ```
 
 설치가 완료될 때까지 기다립니다.
