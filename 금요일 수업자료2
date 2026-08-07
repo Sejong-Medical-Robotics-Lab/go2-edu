@@ -1,0 +1,663 @@
+# Go2 실기체 실습
+
+## 0. 공통 준비
+
+Go2 전원을 켜고 로봇 PC에 접속합니다.
+
+리모컨의 **Start 버튼을 눌러 로봇을 보행 가능한 상태**로 전환합니다.
+
+각 터미널을 새로 열 때 아래 환경 설정을 실행합니다.
+
+```bash
+cd ~/Desktop/unitree_ros2
+
+source /opt/ros/humble/setup.bash
+source setup.sh
+source install/setup.bash
+```
+
+> 새로운 터미널을 열면 ROS2 및 Unitree 작업환경을 다시 `source`해야 할 수 있습니다.
+
+실습 전에는 반드시 로봇 주변의 장애물과 사람을 확인하고, 비상시 즉시 정지할 수 있도록 **리모컨을 가까이에 준비합니다.**
+
+---
+
+## 주요 파일 역할
+
+| 파일 | 역할 |
+| --- | --- |
+| `.cpp` / `.py` | 실제 로봇 동작 로직을 작성하는 코드 |
+| `CMakeLists.txt` | C++ 코드를 빌드하고 ROS2 실행 파일로 등록 |
+| `setup.py` | Python 노드를 `ros2 run`으로 실행할 수 있도록 등록 |
+| `ros2_sport_client.h/.cpp` | Unitree Sport API를 사용할 수 있게 해주는 지원 코드 |
+| `go2_nav_bridge.cpp` | `/cmd_vel`을 Go2 Sport API 이동 명령으로 변환 |
+
+---
+
+# 1. 키보드로 Go2 조작하기
+
+키보드 입력은 `teleop_twist_keyboard` 노드가 `/cmd_vel` 토픽으로 발행합니다.
+
+`go2_nav_bridge`는 `/cmd_vel`을 구독하고 이를 Unitree Sport API의 이동 명령으로 변환하여 실제 Go2에 전달합니다.
+
+전체 흐름은 다음과 같습니다.
+
+```text
+키보드 입력
+      ↓
+teleop_twist_keyboard
+      ↓
+   /cmd_vel
+      ↓
+go2_nav_bridge
+      ↓
+Unitree Move API
+      ↓
+     Go2
+```
+
+---
+
+## 1.1 터미널 1: Go2 브리지 실행
+
+새 터미널을 열고 다음 명령을 실행합니다.
+
+```bash
+cd ~/Desktop/unitree_ros2
+
+source /opt/ros/humble/setup.bash
+source setup.sh
+source install/setup.bash
+
+ros2 run my_go2_nav go2_nav_bridge
+```
+
+이 터미널은 실행된 상태로 유지합니다.
+
+---
+
+## 1.2 터미널 2: 키보드 조작 실행
+
+새로운 터미널을 하나 더 열고 다음 명령을 실행합니다.
+
+```bash
+cd ~/Desktop/unitree_ros2
+
+source /opt/ros/humble/setup.bash
+source setup.sh
+source install/setup.bash
+
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+--ros-args -p speed:=0.5 -p turn:=1.0
+```
+
+화면에 표시되는 키를 이용해 다음 동작을 확인합니다.
+
+```text
+전진
+후진
+좌우 이동
+회전
+```
+
+정지:
+
+```text
+k
+```
+
+프로그램 종료:
+
+```text
+Ctrl + C
+```
+
+> 로봇이 예상하지 못한 방향으로 움직일 경우 즉시 `k`를 누르거나 리모컨을 이용해 정지합니다.
+
+---
+
+## 1.3 브리지 코드 확인
+
+브리지 코드를 직접 열어봅니다.
+
+```bash
+gedit ~/Desktop/unitree_ros2/src/my_go2_nav/src/go2_nav_bridge.cpp
+```
+
+코드에서 다음 흐름을 찾아봅니다.
+
+```text
+/cmd_vel 구독
+      ↓
+linear.x
+linear.y
+angular.z
+값 읽기
+      ↓
+sport_client_.Move()
+      ↓
+Go2 이동 명령 전달
+```
+
+즉, `teleop_twist_keyboard`가 직접 Go2를 움직이는 것이 아니라:
+
+```text
+teleop
+→ /cmd_vel
+→ bridge
+→ Sport API
+→ Go2
+```
+
+순서로 명령이 전달됩니다.
+
+---
+
+# 2. Sport API로 기립·자세 낮추기
+
+이번 실습에서는 학생이 직접 C++ ROS2 노드를 작성하고 Unitree Sport API의 다음 명령을 호출합니다.
+
+```text
+StandUp
+StandDown
+StopMove
+```
+
+목표는 다음과 같습니다.
+
+```text
+ROS2 노드 작성
+      ↓
+SportClient 사용
+      ↓
+Unitree Sport API 호출
+      ↓
+실제 Go2 동작
+```
+
+---
+
+## 2.1 C++ 파일 생성
+
+먼저 `my_go2_nav` 패키지의 `src` 폴더로 이동합니다.
+
+```bash
+cd ~/Desktop/unitree_ros2/src/my_go2_nav/src
+```
+
+새로운 C++ 파일을 생성합니다.
+
+```bash
+gedit student_sport_demo.cpp
+```
+
+아래 코드를 붙여 넣고 저장합니다.
+
+```cpp
+#include <chrono>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <thread>
+
+#include <rclcpp/rclcpp.hpp>
+#include "common/ros2_sport_client.h"
+
+class StudentSportDemo : public rclcpp::Node
+{
+public:
+  StudentSportDemo()
+  : Node("student_sport_demo"),
+    sport_client_(this)
+  {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Student Sport API node started"
+    );
+  }
+
+  void stand_up()
+  {
+    sport_client_.StandUp(req_);
+    RCLCPP_INFO(
+      this->get_logger(),
+      "StandUp command sent"
+    );
+  }
+
+  void stand_down()
+  {
+    sport_client_.StandDown(req_);
+    RCLCPP_INFO(
+      this->get_logger(),
+      "StandDown command sent"
+    );
+  }
+
+  void stop()
+  {
+    sport_client_.StopMove(req_);
+    RCLCPP_INFO(
+      this->get_logger(),
+      "StopMove command sent"
+    );
+  }
+
+private:
+  SportClient sport_client_;
+  unitree_api::msg::Request req_;
+};
+
+int main(int argc, char **argv)
+{
+  rclcpp::init(argc, argv);
+
+  auto node = std::make_shared<StudentSportDemo>();
+
+  // ROS2 노드와 통신 환경이 준비될 시간을 잠시 기다림
+  std::this_thread::sleep_for(
+    std::chrono::seconds(1)
+  );
+
+  std::string input;
+
+  while (rclcpp::ok())
+  {
+    std::cout << "\n";
+    std::cout << "========================\n";
+    std::cout << " Student Sport API Demo\n";
+    std::cout << "========================\n";
+    std::cout << "1 : Stand Up\n";
+    std::cout << "2 : Stand Down\n";
+    std::cout << "q : Stop and Quit\n";
+    std::cout << "Select: ";
+
+    std::getline(std::cin, input);
+
+    if (input == "1")
+    {
+      node->stand_up();
+    }
+    else if (input == "2")
+    {
+      node->stand_down();
+    }
+    else if (input == "q" || input == "Q")
+    {
+      node->stop();
+      break;
+    }
+    else
+    {
+      std::cout << "잘못된 입력입니다.\n";
+    }
+
+    // 현재 노드에 들어온 ROS2 작업을 처리
+    rclcpp::spin_some(node);
+  }
+
+  rclcpp::shutdown();
+  return 0;
+}
+```
+
+---
+
+## 2.2 코드 구조 확인
+
+코드에서 가장 중요한 부분은 다음입니다.
+
+### SportClient 생성
+
+```cpp
+SportClient sport_client_;
+unitree_api::msg::Request req_;
+```
+
+`SportClient`를 이용하여 Unitree Sport API 명령을 전달합니다.
+
+---
+
+### 기립 명령
+
+```cpp
+sport_client_.StandUp(req_);
+```
+
+실행되면 Go2에 기립 명령을 전달합니다.
+
+---
+
+### 자세 낮추기 명령
+
+```cpp
+sport_client_.StandDown(req_);
+```
+
+Go2에 자세를 낮추는 명령을 전달합니다.
+
+---
+
+### 정지 명령
+
+```cpp
+sport_client_.StopMove(req_);
+```
+
+현재 이동 명령을 정지합니다.
+
+프로그램을 종료할 때도 명시적으로 `StopMove()`를 호출합니다.
+
+---
+
+# 3. CMakeLists.txt 등록
+
+C++ 파일을 작성했다고 바로 `ros2 run`으로 실행할 수 있는 것은 아닙니다.
+
+ROS2가 실행 파일로 사용할 수 있도록 `CMakeLists.txt`에 등록하고 빌드해야 합니다.
+
+다음 파일을 엽니다.
+
+```bash
+gedit ~/Desktop/unitree_ros2/src/my_go2_nav/CMakeLists.txt
+```
+
+전체 내용을 아래와 같이 작성합니다.
+
+```cmake
+cmake_minimum_required(VERSION 3.5)
+project(my_go2_nav)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(unitree_api REQUIRED)
+find_package(unitree_go REQUIRED)
+
+# -------------------------------------------------
+# /cmd_vel → Unitree Sport API 브리지
+# -------------------------------------------------
+
+add_executable(go2_nav_bridge
+  src/go2_nav_bridge.cpp
+  src/ros2_sport_client.cpp
+  src/go2_sport_client.cpp
+)
+
+target_include_directories(go2_nav_bridge PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/common>
+  src
+)
+
+ament_target_dependencies(go2_nav_bridge
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
+  unitree_api
+  unitree_go
+)
+
+# -------------------------------------------------
+# 기존 Go2 기본 Sport API 예제
+# -------------------------------------------------
+
+add_executable(go2_basic_demo
+  src/go2_basic_demo.cpp
+  src/ros2_sport_client.cpp
+)
+
+target_include_directories(go2_basic_demo PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/common>
+  src
+)
+
+ament_target_dependencies(go2_basic_demo
+  rclcpp
+  unitree_api
+  unitree_go
+)
+
+# -------------------------------------------------
+# 학생 Sport API 실습 노드
+# -------------------------------------------------
+
+add_executable(student_sport_demo
+  src/student_sport_demo.cpp
+  src/ros2_sport_client.cpp
+)
+
+target_include_directories(student_sport_demo PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/common>
+  src
+)
+
+ament_target_dependencies(student_sport_demo
+  rclcpp
+  unitree_api
+  unitree_go
+)
+
+# -------------------------------------------------
+# 실행 파일 설치
+# -------------------------------------------------
+
+install(TARGETS
+  go2_nav_bridge
+  go2_basic_demo
+  student_sport_demo
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()
+```
+
+여기서 새로 작성한 파일을 ROS2 실행 파일로 만드는 부분은 다음입니다.
+
+```cmake
+add_executable(student_sport_demo
+  src/student_sport_demo.cpp
+  src/ros2_sport_client.cpp
+)
+```
+
+그리고 필요한 ROS2 및 Unitree 패키지를 연결합니다.
+
+```cmake
+ament_target_dependencies(student_sport_demo
+  rclcpp
+  unitree_api
+  unitree_go
+)
+```
+
+마지막으로 `ros2 run`에서 찾을 수 있도록 실행 파일을 설치 대상으로 등록합니다.
+
+```cmake
+install(TARGETS
+  go2_nav_bridge
+  go2_basic_demo
+  student_sport_demo
+  DESTINATION lib/${PROJECT_NAME}
+)
+```
+
+---
+
+# 4. 패키지 빌드
+
+작업공간으로 이동합니다.
+
+```bash
+cd ~/Desktop/unitree_ros2
+```
+
+`my_go2_nav` 패키지만 빌드합니다.
+
+```bash
+colcon build --symlink-install --packages-select my_go2_nav
+```
+
+빌드가 성공하면 현재 터미널에 새 결과를 적용합니다.
+
+```bash
+source install/setup.bash
+```
+
+> 새로 빌드한 실행 파일을 사용하려면 빌드 후 `source install/setup.bash`를 다시 실행해야 합니다.
+
+---
+
+# 5. 실행 파일 등록 확인
+
+다음 명령으로 `my_go2_nav` 패키지에 등록된 실행 파일을 확인합니다.
+
+```bash
+ros2 pkg executables my_go2_nav
+```
+
+출력에서 다음 항목이 보이는지 확인합니다.
+
+```text
+my_go2_nav student_sport_demo
+```
+
+기존 실행 파일도 함께 표시될 수 있습니다.
+
+예:
+
+```text
+my_go2_nav go2_basic_demo
+my_go2_nav go2_nav_bridge
+my_go2_nav student_sport_demo
+```
+
+`student_sport_demo`가 보이지 않는다면 다음 항목을 확인합니다.
+
+```text
+CMakeLists.txt 등록 여부
+      ↓
+colcon build 성공 여부
+      ↓
+source install/setup.bash 실행 여부
+```
+
+---
+
+# 6. Sport API 실습 실행
+
+다음 명령으로 작성한 노드를 실행합니다.
+
+```bash
+ros2 run my_go2_nav student_sport_demo
+```
+
+화면에 다음 메뉴가 표시됩니다.
+
+```text
+========================
+ Student Sport API Demo
+========================
+1 : Stand Up
+2 : Stand Down
+q : Stop and Quit
+Select:
+```
+
+입력에 따라 다음 명령이 실행됩니다.
+
+```text
+1
+→ StandUp
+→ Go2 기립
+
+2
+→ StandDown
+→ Go2 자세 낮추기
+
+q
+→ StopMove
+→ 프로그램 종료
+```
+
+---
+
+# 7. 이번 실습에서 확인할 핵심
+
+이번 실습의 핵심은 단순히 Go2를 움직이는 것이 아니라 **ROS2 코드가 실제 로봇 명령으로 전달되는 흐름을 이해하는 것**입니다.
+
+키보드 제어에서는:
+
+```text
+키보드
+→ teleop_twist_keyboard
+→ /cmd_vel
+→ go2_nav_bridge
+→ Sport API
+→ Go2
+```
+
+직접 작성한 C++ 노드에서는:
+
+```text
+student_sport_demo
+→ SportClient
+→ Unitree Sport API
+→ Go2
+```
+
+의 흐름을 사용합니다.
+
+즉, ROS2에서는 실제 로봇을 제어할 때:
+
+```text
+노드 작성
+→ 필요한 API 또는 토픽 사용
+→ 빌드
+→ 실행
+→ 실제 로봇 동작 확인
+```
+
+과정을 거치게 됩니다.
+
+---
+
+# 8. 실습 종료
+
+실습이 끝나면 이동 중인 로봇이 없는지 확인합니다.
+
+키보드 Teleop을 사용 중이라면:
+
+```text
+k
+```
+
+를 눌러 정지합니다.
+
+각 ROS2 프로그램은:
+
+```text
+Ctrl + C
+```
+
+로 종료합니다.
+
+`student_sport_demo`에서는 가능하면:
+
+```text
+q
+```
+
+를 입력하여 `StopMove` 명령을 전송한 뒤 종료합니다.
+
+마지막으로 로봇이 안정적으로 정지한 것을 확인한 뒤 실습을 종료합니다.
